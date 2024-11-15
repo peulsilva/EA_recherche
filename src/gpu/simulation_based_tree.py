@@ -2,7 +2,7 @@ import torch
 import numpy as np
 
 class SimulationBasedModel:
-    def __init__(self, n, K, r, dt, option_type : str, device='cuda'):
+    def __init__(self, n, K, r, dt, option_type : str, model : str, device='cuda'):
         self.n = n
         self.K = K
         self.r = r
@@ -12,6 +12,9 @@ class SimulationBasedModel:
 
         assert option_type in ['european', 'american']
         self.option_type = option_type
+
+        assert model in ['bs', 'heston']
+        self.model = model
 
     def compute_quantiles(self, values, num_quantiles):
         """Compute quantile bins using torch."""
@@ -45,7 +48,7 @@ class SimulationBasedModel:
         transition_matrix.index_put_((current_bins, next_bins), torch.ones_like(current_bins), accumulate=True)
 
         probabilities = transition_matrix/transition_matrix.sum(dim=1, keepdim=True)
-        return probabilities
+        return probabilities.to_sparse()
 
     def compute_option_prices_counting(self, St, g : callable):
         """Compute option prices with backward induction."""
@@ -60,18 +63,12 @@ class SimulationBasedModel:
             # Compute quantile bins for current and next time steps
             bins_current, prices_t = self.compute_quantiles(St[:, t], t+3)
 
-            
-
             if t == n-1:
                 self.memo[t] = (g(prices_t[1:-1], self.K))
                 continue
 
             bins_next, prices_t_next = self.compute_quantiles(St[:, t + 1], t+4)
-
-
-            # Compute transition probabilities
-
-            # return bins_current, bins_next
+            
             probabilities = self.compute_transition_matrix(
                 bins_current, 
                 bins_next,
@@ -80,12 +77,13 @@ class SimulationBasedModel:
 
             continuation_values = probabilities @ (self.memo[t+1] * torch.exp(torch.tensor(-self.r * self.dt)))
 
-            stopping_values_all = g(prices_t, self.K)
+            stopping_values_all = g(prices_t[1:-1], self.K)
             if self.option_type == 'european':
                 self.memo[t] = continuation_values
 
             elif self.option_type == 'american':
                 self.memo[t] = torch.maximum(continuation_values, stopping_values_all)
+
 
         # Option price at time 0
         option_price = self.memo[0][0]
@@ -129,7 +127,7 @@ class SimulationBasedModel:
         return mean_variances_per_bin.view(-1, 1)
 
     def torch_norm_cdf(self, x):
-        return 0.5 * (1.0 + torch.erf(x / np.sqrt(2)))
+        return 0.5 * (1.0 + torch.erf(x / torch.sqrt(2)))
 
     def compute_option_prices_probabilities(
             self,
@@ -152,7 +150,10 @@ class SimulationBasedModel:
             if t == 0:
                 var = v0
             else:
-                var = v0
+                if self.model == 'bs':
+                    var = v0
+                else:
+                    var = self.get_variance(St, vt, t)
 
             log_prices = torch.log(prices)
 

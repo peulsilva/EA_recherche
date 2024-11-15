@@ -3,8 +3,8 @@ from numba import njit
 import torch
 
 class PathSimulator:
-    def __init__(self) -> None:
-        pass
+    def __init__(self,) -> None:
+        ...
 
     @classmethod
     def bs(
@@ -86,7 +86,7 @@ class PathSimulator:
         return St
 
     
-    @classmethod
+    # @classmethod
     def heston_gpu(
         cls,
         T, 
@@ -98,23 +98,24 @@ class PathSimulator:
         v0,
         S0,
         eta, 
-        r
+        r,
+        device = 'cuda'
     ):
         dt = T/n
-        mean = torch.zeros(2, device='cuda')
-        cov = torch.tensor([[1, rho], [rho, 1]], device='cuda')
+        z1 = torch.randn(m, n, device=device)
+        z2 = torch.randn(m, n, device=device)
 
-        # Multivariate normal distribution
-        mvn = torch.distributions.MultivariateNormal(mean, cov)
+        # Clamp rho_ to avoid numerical issues
+        eps = 1e-6
+        rho_clamped = torch.clamp(rho, min=-1 + eps, max=1 - eps)
 
-        # Generate samples (size: m x n x 2)
-        brownian = mvn.sample((m, n)) * torch.sqrt(torch.tensor(dt, device='cuda'))
+        # Compute dW and dW_hat using reparameterization
+        sqrt_dt = torch.sqrt(torch.tensor(dt, device=device))
+        dW = z1 * sqrt_dt
+        sqrt_one_minus_rho_squared = torch.sqrt(1 - rho_clamped ** 2)
+        dW_hat = (rho_clamped * z1 + sqrt_one_minus_rho_squared * z2) * sqrt_dt
 
-        # Extract dW and dW_hat
-        dW = brownian[:, :, 0]
-        dW_hat = brownian[:, :, 1]
-
-        St, vt = PathSimulator.__generate_trajectories_heston_gpu(
+        St, vt = cls.__generate_trajectories_heston_gpu(
             dW,
             dW_hat,
             kappa,
@@ -129,9 +130,9 @@ class PathSimulator:
 
         return St, vt
 
-    @classmethod
+    # @classmethod
     def heston(
-        cls,
+        self,
         T, 
         m,
         n,
@@ -152,7 +153,7 @@ class PathSimulator:
         )
         dW, dW_hat= brownian[:,:,0]*np.sqrt(dt), brownian[:,:,1]*np.sqrt(dt)
 
-        return PathSimulator.__generate_trajectories_heston(
+        return self.__generate_trajectories_heston(
             dW,
             dW_hat,
             kappa,
@@ -196,8 +197,9 @@ class PathSimulator:
 
         return S, v
     
-    @staticmethod
+    # @staticmethod
     def __generate_trajectories_heston_gpu(
+        self,
         dW,
         dW_hat,
         kappa,
@@ -210,8 +212,9 @@ class PathSimulator:
         n
     ):
         m = dW.size(0)
-        St = torch.zeros((m, n), device='cuda')
-        vt = torch.zeros((m, n), device='cuda')
+        device = dW.device
+        St = torch.zeros((m, n), device=device)
+        vt = torch.zeros((m, n), device=device)
 
         # Initial conditions
         St[:, 0] = S0
@@ -219,13 +222,17 @@ class PathSimulator:
 
         for t in range(1, n):
             # Ensure variance is non-negative
-            sqrt_v_prev = torch.sqrt(torch.clamp(vt[:, t - 1], min=0))
+            v_t_1 = vt[:, t - 1].clone()
+            sqrt_v_prev = torch.sqrt(torch.clamp(v_t_1, min=0)).clone()
 
             # Variance process
-            vt[:, t] = vt[:, t - 1] + kappa * (theta - vt[:, t - 1]) * dt + eta * sqrt_v_prev * dW_hat[:, t - 1]
-            vt[:, t] = torch.clamp(vt[:, t], min=0)
+            vt[:, t] = torch.clamp(v_t_1+ kappa * (theta - v_t_1) * dt + eta * sqrt_v_prev * dW_hat[:, t - 1], min=0)
 
             # Price process
-            St[:, t] = St[:, t - 1] * torch.exp((r - 0.5 * vt[:, t - 1]) * dt + sqrt_v_prev * dW[:, t - 1])
 
+            S_t_1 = St[:, t - 1].clone() 
+            St[:, t] = S_t_1* torch.exp((r - 0.5 * v_t_1) * dt + sqrt_v_prev * dW[:, t - 1])
+
+        if torch.isnan(St).any() or torch.isnan(vt).any():
+            raise ValueError(f"NaN detected at timestep {t} in St or vt")
         return St, vt
