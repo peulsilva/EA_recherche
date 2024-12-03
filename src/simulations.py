@@ -107,7 +107,7 @@ class PathSimulator:
 
         # Clamp rho_ to avoid numerical issues
         eps = 1e-6
-        rho_clamped = torch.clamp(rho, min=-1 + eps, max=1 - eps)
+        rho_clamped = torch.clamp(torch.tensor(rho), min=-1 + eps, max=1 - eps)
 
         # Compute dW and dW_hat using reparameterization
         sqrt_dt = torch.sqrt(torch.tensor(dt, device=device))
